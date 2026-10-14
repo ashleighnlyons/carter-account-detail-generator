@@ -31,4 +31,3 @@ pnpm preview
 ```
 
 The `main` branch deploys the static `dist` directory through GitHub Actions. The GitHub Actions environment selects the repository base path; local development retains relative asset paths.
-
