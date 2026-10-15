@@ -16,7 +16,11 @@ const MONEY=MONEY_FORMAT;
 const TB_MONEY='$#,##0.00;($#,##0.00);"-"';
 type Value=string|number|boolean|null|undefined|XLSX.CellObject;
 const amount=(value:number|undefined, unavailable=false):Value => value===undefined ? (unavailable?'Unavailable':undefined) : {t:'n',v:fromCents(toCents(value)),z:MONEY};
-const count=(value:number|undefined):Value=>value===undefined?undefined:{t:'n',v:value,z:'#,##0'};
+function periodLabel(value:string|undefined){
+  if(!value)return 'Period end unavailable';
+  const date=/^\d{4}-\d{2}-\d{2}$/.test(value)?new Date(`${value}T00:00:00.000Z`):undefined;
+  return date&&Number.isFinite(date.getTime())?new Intl.DateTimeFormat('en-US',{timeZone:'UTC',month:'long',day:'numeric',year:'numeric'}).format(date):value;
+}
 function tableLabels(labels:readonly string[]){const used=new Set<string>();return labels.map(label=>{let value=label,i=1;while(used.has(value.toLowerCase()))value=`${label} [${++i}]`;used.add(value.toLowerCase());return value;});}
 /** UTC calendar dates: Excel's 1900 date system, including its historical leap-day offset. */
 export function excelDate(value:string|undefined):Value {
@@ -80,47 +84,45 @@ function sourceValue(label:string,value:SourceFieldValue|undefined):Value {
 /** Values-only serialization. No formulas, macros, external links or application persistence. */
 export function serializeWorkbook(plan:AccountDetailWorkbookPlan):ArrayBuffer {
   const expected=validateGenerationPlan(plan),written={sheets:1,leadcodes:0,accounts:0,transactions:0};
-  let cells=(20+plan.summary.length*5)*5;
+  let cells=(20+plan.summary.length*6)*3;
   for(const s of plan.leadcodeSheets){const cols=12+s.additionalSourceColumns.length,rows=leadcodeRows(s);cells+=rows*cols;validateOutputDimensions(rows,cols,cells);}
-  validateOutputDimensions(20+plan.summary.length*5,5,cells);
+  validateOutputDimensions(20+plan.summary.length*6,3,cells);
   const presentations:SheetPresentation[]=[];
   const workbook=XLSX.utils.book_new(),b=sheetBuilder(),meta=plan.metadata;
-  const summaryStyle={titleRows:[1],sectionRows:[] as number[],headerRows:[] as number[],warningRows:[] as number[],noteRows:[] as number[],totalRows:[] as number[],cellStyles:{} as Record<string,'label'|'warning'|'error'|'success'|'link'|'note'>,merges:[] as string[],tables:[] as NativeTable[]};
-  b.add(['Account Detail Summary'],24);b.add([]);
-  b.add(['Client',meta?.displayEntity??meta?.tbContext?.entity?.value??'Unavailable']);summaryStyle.cellStyles.A3='label';
-  b.add(['Period End',meta?.displayPeriodEnd?excelDate(meta.displayPeriodEnd):meta?.tbContext?.periodEnd?excelDate(meta.tbContext.periodEnd.value):'Unavailable']);summaryStyle.cellStyles.A4='label';b.add([]);
-  const summaryHeader=b.row+1,summaryLabels=['Leadcode','Description','Unadjusted TB Balance','GL Accounts','Transactions'];
-  b.add(summaryLabels,30);summaryStyle.headerRows.push(b.row);
+  const summaryStyle={titleRows:[1],sectionRows:[] as number[],headerRows:[] as number[],summaryBoxRows:[] as number[],warningRows:[] as number[],noteRows:[] as number[],totalRows:[] as number[],cellStyles:{} as Record<string,'label'|'warning'|'error'|'success'|'link'|'note'>,merges:[] as string[],tables:[] as NativeTable[]};
+  b.add([meta?.displayEntity??meta?.tbContext?.entity?.value??'Client unavailable'],32);summaryStyle.merges.push('A1:C1');
+  b.add([`Account Detail — ${periodLabel(meta?.displayPeriodEnd??meta?.tbContext?.periodEnd?.value)}`],24);summaryStyle.noteRows.push(b.row);summaryStyle.merges.push('A2:C2');
+  b.add([],18);
+  const summaryHeader=b.row+1,summaryLabels=['Leadcode','Description','TB Balance'];
+  b.add(summaryLabels,29);summaryStyle.headerRows.push(b.row);summaryStyle.summaryBoxRows.push(b.row);
   for(const r of plan.summary){
-    b.add([r.leadcode,r.leadcodeDescription,{t:'n',v:fromCents(toCents(r.unadjustedTBBalance)),z:TB_MONEY},`${r.matchedAccountCount} of ${r.numberOfAccounts}`,count(r.transactionCount)],24);
+    b.add([r.leadcode,r.leadcodeDescription,{t:'n',v:fromCents(toCents(r.unadjustedTBBalance)),z:TB_MONEY}],31);summaryStyle.summaryBoxRows.push(b.row);
   }
-  b.add(['TB Balance is the Unadjusted TB balance. GL Accounts shows matched GL accounts over selected TB accounts.'],30);summaryStyle.noteRows.push(b.row);summaryStyle.merges.push(`A${b.row}:E${b.row}`);
-  b.add([]);b.add(['Items to Review'],22);summaryStyle.sectionRows.push(b.row);summaryStyle.merges.push(`A${b.row}:E${b.row}`);
-  b.add(['Scope','Issue','Count','Action','Status'],30);summaryStyle.headerRows.push(b.row);
+  b.add([],24);b.add(['Items to Review'],27);summaryStyle.sectionRows.push(b.row);summaryStyle.merges.push(`A${b.row}:C${b.row}`);
   let issues=0;
-  const addIssue=(scope:string,issue:string,value:number,action:string,status='Review')=>{b.add([scope,issue,count(value),action,status],36);summaryStyle.warningRows.push(b.row);issues++;};
+  const addIssue=(scope:string,issue:string,value:number,action:string)=>{const label=value===1?issue.replaceAll('accounts','account').replaceAll('leadcodes','leadcode'):issue;b.add([`${value.toLocaleString('en-US')} ${label} ${scope}; ${action}`],37);summaryStyle.warningRows.push(b.row);summaryStyle.merges.push(`A${b.row}:C${b.row}`);issues++;};
   for(const r of plan.summary){
-    if(r.unmatchedAccountCount)addIssue(r.leadcode,'TB accounts without a matching GL account',r.unmatchedAccountCount,'Review account mapping; GL detail and balance validation are unavailable.');
+    if(r.unmatchedAccountCount)addIssue(`in leadcode ${r.leadcode}`,'unmatched TB accounts',r.unmatchedAccountCount,'GL detail and balance validation are unavailable for these accounts.');
     const otherUnavailable=Math.max(0,(r.balanceUnavailableCount??0)-r.unmatchedAccountCount);
-    if(otherUnavailable)addIssue(r.leadcode,'Matched accounts without reliable GL balance validation',otherUnavailable,'Review the source GL balance controls.');
-    if(r.balanceDifferenceCount)addIssue(r.leadcode,'GL balances that differ from Unadjusted TB',r.balanceDifferenceCount,'Review the account-level GL and TB balances.','Difference');
-    if(r.noActivityAccountCount)addIssue(r.leadcode,'Matched accounts with no GL transactions',r.noActivityAccountCount,'Confirm no-activity accounts are expected.');
-    if(!r.transactionCount)addIssue(r.leadcode,'No matched GL transactions',1,'Confirm the selected leadcode and account mappings.');
+    if(otherUnavailable)addIssue(`in leadcode ${r.leadcode}`,'matched accounts without reliable GL balance validation',otherUnavailable,'review the source GL balance controls.');
+    if(r.balanceDifferenceCount)addIssue(`in leadcode ${r.leadcode}`,'GL balances differ from Unadjusted TB',r.balanceDifferenceCount,'review the account-level GL and TB balances.');
+    if(r.noActivityAccountCount)addIssue(`in leadcode ${r.leadcode}`,'matched accounts with no GL transactions',r.noActivityAccountCount,'confirm that no activity is expected.');
+    if(!r.transactionCount)addIssue(`in leadcode ${r.leadcode}`,'selected leadcodes with no matched GL transactions',1,'confirm the selection and account mappings.');
   }
-  if(meta?.glOnlyAccountCount)addIssue('All GL','GL accounts not mapped to the uploaded TB',meta.glOnlyAccountCount,'Review GL-only accounts; they are outside selected leadcodes.');
-  if(!issues){b.add(['All selected leadcodes','No actionable mapping or balance exceptions identified',0,'No action indicated by current controls.','None'],30);summaryStyle.noteRows.push(b.row);}
-  b.add(['A completed GL-to-TB reconciliation is not represented where GL balance validation is unavailable.'],30);summaryStyle.noteRows.push(b.row);summaryStyle.merges.push(`A${b.row}:E${b.row}`);
-  XLSX.utils.book_append_sheet(workbook,b.finish([20,44,18,58,16]),'Summary');
-  presentations.push({...summaryStyle,name:'Summary',rows:b.row,columns:5,freezeRows:0,freezeColumns:0,printHeader:summaryHeader,printColumns:5});
+  if(meta?.glOnlyAccountCount)addIssue('across the full GL; no leadcode assignment has been verified','GL-only accounts',meta.glOnlyAccountCount,'review accounts outside the uploaded TB.');
+  if(!issues){b.add(['No actionable mapping or balance exceptions identified.'],30);summaryStyle.noteRows.push(b.row);summaryStyle.merges.push(`A${b.row}:C${b.row}`);}
+  b.add([],18);b.add(['TB Balance is unadjusted. A completed GL-to-TB reconciliation is not represented where GL balance validation is unavailable.'],36);summaryStyle.noteRows.push(b.row);summaryStyle.merges.push(`A${b.row}:C${b.row}`);
+  XLSX.utils.book_append_sheet(workbook,b.finish([21,39,24]),'Summary');
+  presentations.push({...summaryStyle,name:'Summary',rows:b.row,columns:3,freezeRows:0,freezeColumns:0,printHeader:summaryHeader,printColumns:3});
   for(const s of plan.leadcodeSheets){const a=sheetBuilder();
     const style={titleRows:[] as number[],sectionRows:[] as number[],headerRows:[] as number[],warningRows:[] as number[],noteRows:[] as number[],totalRows:[] as number[],cellStyles:{} as Record<string,'label'|'warning'|'error'|'success'|'note'>,merges:[] as string[],tables:[] as NativeTable[]};
     const labels=tableLabels([...OUTPUT_CONTRACT.transactionColumns,...s.additionalSourceColumns,...OUTPUT_CONTRACT.sourceRowTraceability]);
-    const header=a.row+1;a.add(labels,36);style.headerRows.push(a.row);style.tables.push({name:`TransactionDetail_${presentations.length}`,header,count:s.transactions.length,labels});
+    const header=a.row+1;a.add(labels,30);style.headerRows.push(a.row);style.tables.push({name:`TransactionDetail_${presentations.length}`,header,count:s.transactions.length,labels});
     const transitionRows:number[]=[];let priorAccount:string|undefined;
     for(const t of s.transactions){if(priorAccount!==undefined&&priorAccount!==t.accountNumber)transitionRows.push(a.row+1);priorAccount=t.accountNumber;
-      a.add([t.accountNumber,t.accountDescription,excelDate(t.transactionDate),t.reference,t.payeeOrName,t.description,amount(t.debit),amount(t.credit),amount(t.runningBalance),...s.additionalSourceColumns.map(k=>sourceValue(k,t.sourceFields[k])),t.sourceFormat,t.sourceSheetName,t.sourceRowNumber],Math.min(48,Math.max(20,Math.ceil((t.description?.length??0)/58)*14)));written.transactions++;}
+      a.add([t.accountNumber,t.accountDescription,excelDate(t.transactionDate),t.reference,t.payeeOrName,t.description,amount(t.debit),amount(t.credit),amount(t.runningBalance),...s.additionalSourceColumns.map(k=>sourceValue(k,t.sourceFields[k])),t.sourceFormat,t.sourceSheetName,t.sourceRowNumber],Math.min(48,Math.max(28,Math.ceil((t.description?.length??0)/58)*14)));written.transactions++;}
     const hidden=Array.from({length:s.additionalSourceColumns.length+3},(_,index)=>OUTPUT_CONTRACT.transactionColumns.length+index);
-    const widths=[18,40,14,18,30,54,15,15,15,...s.additionalSourceColumns.map(sourceWidth),14,24,14];
+    const widths=[19,39,15,19,29,55,17,17,17,...s.additionalSourceColumns.map(sourceWidth),14,24,14];
     const memoColumns=['B','E','F',...s.additionalSourceColumns.flatMap((label,index)=>/description|memo|remark|payee|payer|person|name/.test(normalizedHeader(label))?[XLSX.utils.encode_col(index+OUTPUT_CONTRACT.transactionColumns.length)]:[])];
     XLSX.utils.book_append_sheet(workbook,a.finish(widths,hidden),s.sheetName);
     presentations.push({...style,name:s.sheetName,rows:a.row,columns:labels.length,freezeRows:1,freezeColumns:0,printHeader:1,printColumns:9,representedAccounts:s.accounts.length,transactions:{start:2,count:s.transactions.length},transactionRequiredColumns:[0,1,labels.length-3,labels.length-2,labels.length-1],memoColumns,transitionRows});written.accounts+=s.accounts.length;written.sheets++;written.leadcodes++;

@@ -3,7 +3,7 @@ import {GenerationError} from '../output/generationEligibility';
 import {assertGenerationCounts,integrityFailure} from '../output/generationIntegrity';
 import type {GenerationCounts} from '../output/generationIntegrity';
 
-type StyleRole='title'|'header'|'section'|'label'|'note'|'warning'|'error'|'link'|'memo'|'success';
+type StyleRole='title'|'header'|'boxedHeader'|'section'|'label'|'note'|'warning'|'error'|'link'|'memo'|'success';
 export interface NativeTable {readonly name:string;readonly header:number;readonly count:number;readonly labels:readonly string[];}
 export interface SheetPresentation {
   readonly name:string;readonly rows:number;readonly columns:number;
@@ -14,6 +14,7 @@ export interface SheetPresentation {
   readonly accounts?:{readonly start:number;readonly count:number};readonly transactions?:{readonly start:number;readonly count:number};
   readonly representedAccounts?:number;readonly transactionRequiredColumns?:readonly number[];readonly memoColumns?:readonly string[];
   readonly transitionRows?:readonly number[];
+  readonly summaryBoxRows?:readonly number[];
   readonly merges?:readonly string[];
 }
 interface Container {FullPaths:string[];FileIndex:{name:string;content:Uint8Array;size:number}[];}
@@ -37,17 +38,17 @@ function styleSheet(xml:string){
     '<font><i/><sz val="10"/><color rgb="FF000000"/><name val="Arial"/></font>',
   ];
   xml=xml.replace(/<fonts\b[^>]*>[\s\S]*?<\/fonts>/,`<fonts count="${fonts.length}">${fonts.join('')}</fonts>`);
-  xml=xml.replace(/<fills\b[^>]*>[\s\S]*?<\/fills>/,'<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>');
-  xml=xml.replace(/<borders\b[^>]*>[\s\S]*?<\/borders>/,'<borders count="3"><border><left/><right/><top/><bottom/><diagonal/></border><border><left/><right/><top/><bottom style="thin"><color rgb="FFB7B7B7"/></bottom><diagonal/></border><border><left/><right/><top style="medium"><color rgb="FFA6A6A6"/></top><bottom/><diagonal/></border></borders>');
+  xml=xml.replace(/<fills\b[^>]*>[\s\S]*?<\/fills>/,'<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF0F2F3"/><bgColor indexed="64"/></patternFill></fill></fills>');
+  xml=xml.replace(/<borders\b[^>]*>[\s\S]*?<\/borders>/,'<borders count="4"><border><left/><right/><top/><bottom/><diagonal/></border><border><left/><right/><top/><bottom style="thin"><color rgb="FFB7B7B7"/></bottom><diagonal/></border><border><left/><right/><top style="thin"><color rgb="FFBCC4CA"/></top><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBFC6CA"/></left><right style="thin"><color rgb="FFBFC6CA"/></right><top style="thin"><color rgb="FFBFC6CA"/></top><bottom style="thin"><color rgb="FFBFC6CA"/></bottom><diagonal/></border></borders>');
   const match=/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/.exec(xml);if(!match)integrityFailure();
   const originals=match[1].match(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/g)??[];if(!originals.length)integrityFailure();
   const styles=originals.map(xf=>{const format=/numFmtId="(\d+)"/.exec(xf)?.[1]??'0';return `<xf numFmtId="${format}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" horizontal="${format==='0'?'left':'right'}"/></xf>`;});
-  const roles={} as Record<StyleRole,number>,totalStyles:Record<number,number>={},transitionStyles:Record<number,number>={};
-  function add(role:StyleRole,font:number,border:number,wrap=false,center=false){roles[role]=styles.length;styles.push(`<xf numFmtId="0" fontId="${font}" fillId="0" borderId="${border}" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"${wrap?' wrapText="1"':''} horizontal="${center?'center':'left'}"/></xf>`);}
-  add('title',2,0);add('header',1,1,true,true);add('section',1,1);add('label',1,0,true);add('note',3,0,true);add('warning',0,0,true);add('error',1,0,true);add('link',0,0);add('memo',0,0,true);add('success',0,0);
-  originals.forEach((xf,id)=>{const format=/numFmtId="(\d+)"/.exec(xf)?.[1]??'0';totalStyles[id]=styles.length;styles.push(`<xf numFmtId="${format}" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>`);transitionStyles[id]=styles.length;styles.push(`<xf numFmtId="${format}" fontId="0" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>`);});
+  const roles={} as Record<StyleRole,number>,totalStyles:Record<number,number>={},transitionStyles:Record<number,number>={},summaryBoxStyles:Record<number,number>={};
+  function add(role:StyleRole,font:number,border:number,wrap=false,center=false,fill=0){roles[role]=styles.length;styles.push(`<xf numFmtId="0" fontId="${font}" fillId="${fill}" borderId="${border}" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"${wrap?' wrapText="1"':''} horizontal="${center?'center':'left'}"/></xf>`);}
+  add('title',2,0);add('header',1,1,true,true,2);add('boxedHeader',1,3,true,false,2);add('section',1,1);add('label',1,0,true);add('note',3,0,true);add('warning',0,0,true);add('error',1,0,true);add('link',0,0);add('memo',0,0,true);add('success',0,0);
+  originals.forEach((xf,id)=>{const format=/numFmtId="(\d+)"/.exec(xf)?.[1]??'0';totalStyles[id]=styles.length;styles.push(`<xf numFmtId="${format}" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>`);transitionStyles[id]=styles.length;styles.push(`<xf numFmtId="${format}" fontId="0" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>`);summaryBoxStyles[id]=styles.length;styles.push(`<xf numFmtId="${format}" fontId="0" fillId="0" borderId="3" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" horizontal="${format==='0'?'left':'right'}"/></xf>`);});
   xml=xml.replace(match[0],`<cellXfs count="${styles.length}">${styles.join('')}</cellXfs>`);
-  return {xml,roles,totalStyles,transitionStyles};
+  return {xml,roles,totalStyles,transitionStyles,summaryBoxStyles};
 }
 /** Verify physical emitted rows/cells, independent of loop counters, before download. */
 export function verifyEmittedPopulation(xml:string,p:SheetPresentation):{accounts:number;transactions:number} {
@@ -81,14 +82,14 @@ export function finishWorkpaperPackage(bytes:ArrayBuffer,presentations:readonly 
   for(const [index,p] of presentations.entries()){
     const path=`xl/worksheets/sheet${index+1}.xml`;let xml=readPart(container,path);
     const emitted=verifyEmittedPopulation(xml,p);written.accounts+=emitted.accounts+(p.representedAccounts??0);written.transactions+=emitted.transactions;
-    const titles=new Set(p.titleRows),headers=new Set(p.headerRows),sections=new Set(p.sectionRows),warnings=new Set(p.warningRows),notes=new Set(p.noteRows),totals=new Set(p.totalRows),transitions=new Set(p.transitionRows??[]);
+    const titles=new Set(p.titleRows),headers=new Set(p.headerRows),sections=new Set(p.sectionRows),warnings=new Set(p.warningRows),notes=new Set(p.noteRows),totals=new Set(p.totalRows),transitions=new Set(p.transitionRows??[]),summaryBox=new Set(p.summaryBoxRows??[]);
     xml=xml.replace(/<c r="([A-Z]+)(\d+)"([^>]*)>/g,(original,col:string,rowText:string,attrs:string)=>{
       const row=Number(rowText),address=col+rowText;let role:StyleRole|undefined;
       if(headers.has(row))role='header';else if(titles.has(row))role='title';else if(sections.has(row))role='section';else if(warnings.has(row))role='warning';else if(notes.has(row))role='note';
       role=p.cellStyles[address]??role;
       const memo=!role&&p.transactions&&row>=p.transactions.start&&(p.memoColumns??['C','G','H']).includes(col);
       if(memo&&!transitions.has(row))role='memo';
-      const old=Number(/\bs="(\d+)"/.exec(attrs)?.[1]??0),style=role?styles.roles[role]:totals.has(row)?styles.totalStyles[old]:transitions.has(row)?styles.transitionStyles[old]:undefined;
+      const old=Number(/\bs="(\d+)"/.exec(attrs)?.[1]??0),style=summaryBox.has(row)?headers.has(row)?styles.roles.boxedHeader:styles.summaryBoxStyles[old]:role?styles.roles[role]:totals.has(row)?styles.totalStyles[old]:transitions.has(row)?styles.transitionStyles[old]:undefined;
       return style===undefined?original:`<c r="${address}"${attrs.replace(/\s+s="\d+"/,'')} s="${style}">`;
     });
     const topLeft=`${utils.encode_col(p.freezeColumns)}${p.freezeRows+1}`;
