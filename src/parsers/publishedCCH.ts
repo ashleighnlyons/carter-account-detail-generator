@@ -54,9 +54,20 @@ export function parsePublishedCCH(workbook: ParserWorkbook, candidate?: Publishe
   let active:{id:string;code:WorkbookCell;description:WorkbookCell}|undefined;
   let activePostingAccountId:string|undefined;
   const reportValues=new Map<string,string>();
+  let closedGroup=false, netIncomeSpacerRow:number|undefined, netIncomeTotalRow:number|undefined;
+  let finalSpacerRow:number|undefined, finalTotalRow:number|undefined;
+  const balanceControlColumns=new Set([unadjustedCol,finalCol,priorCol,...labels(headerRow).flatMap((label,i)=>['aje','rje'].includes(label)?[i]:[])]);
+  const validFinalControl=(row:WorkbookRow,spacer:boolean)=>row.cells.every((cell,i)=>{
+    if(i===markerColumn)return !cell.formula && !cell.error;
+    if(cell.formula || cell.error)return false;
+    if(!spacer && i===descriptionCol)return cellText(cell).trim()==='Sum of Account Groups';
+    if(!spacer && balanceControlColumns.has(i))return cell.value==null || cell.value==='' || (typeof cell.value==='number' && Number.isFinite(cell.value) && Math.abs(cell.value)<.005);
+    return !cellText(cell).trim();
+  }) && (spacer || [unadjustedCol,finalCol,priorCol].every(i=>typeof cellAt(row,i).value==='number' && Number.isFinite(cellAt(row,i).value as number)));
   for(const row of sheet.rows){
     const marker=cellText(cellAt(row,markerColumn));
     if(isBlankRow(row) && !row.cells.some(c=>c.formula)){count('blank');continue;}
+    if(finalTotalRow!==undefined){errors.push(issue('CCH_FINAL_CONTROL_TRAILING_DATA','A nonblank row follows the final CCH report control. Review the original report for additional accounting information.',row));count('review');continue;}
     if(cellAt(row,markerColumn).formula || cellAt(row,markerColumn).error){errors.push(issue('CCH_MARKER_INVALID','A CCH structural row identifier contains a formula or Excel error. Export the original report with usable row identifiers.',row));active=undefined;activePostingAccountId=undefined;count('review');continue;}
     if(marker==='Col_Header_1'){
       count('columnHeader');
@@ -76,11 +87,11 @@ export function parsePublishedCCH(workbook: ParserWorkbook, candidate?: Publishe
       reportValues.set(marker,value);continue;
     }
     if(/^Col_Metadata_row_\d+$/.test(marker)){count('columnMetadata');if(marker==='Col_Metadata_row_2' && (cellText(cellAt(row,accountCol))!=='NameCol' || cellText(cellAt(row,descriptionCol))!=='DescCol')){errors.push(issue('CCH_METADATA_CHANGED','CCH account-column metadata disagrees with the report headers. Export one consistent original report.',row));active=undefined;activePostingAccountId=undefined;}continue;}
-    if(marker==='T_First'){count('tableBoundary');active=undefined;activePostingAccountId=undefined;continue;}
-    if(groupMarker.test(marker)){count('groupHeading');active=undefined;activePostingAccountId=undefined;continue;}
+    if(marker==='T_First'){count('tableBoundary');active=undefined;activePostingAccountId=undefined;closedGroup=false;continue;}
+    if(groupMarker.test(marker)){count('groupHeading');active=undefined;activePostingAccountId=undefined;closedGroup=false;continue;}
     const subgroup=subgroupMarker.exec(marker);
     if(subgroup){
-      count('subgroupHeading');active=undefined;activePostingAccountId=undefined;
+      count('subgroupHeading');active=undefined;activePostingAccountId=undefined;closedGroup=false;
       const codeCell=cellAt(row,accountCol),code=subgroupCode.exec(cellText(codeCell))?.[1];
       // CCH emits an empty unassigned bucket even when every posting row has a leadcode.
       // It supplies no assignment: any following AD row remains an orphan and blocks matching.
@@ -94,9 +105,21 @@ export function parsePublishedCCH(workbook: ParserWorkbook, candidate?: Publishe
       if(!active || active.id!==total[1])errors.push(issue('CCH_SUBGROUP_BOUNDARY','A CCH subtotal does not belong to the active subgroup. Account assignment cannot continue safely.',row));
       active=undefined;activePostingAccountId=undefined;continue;
     }
-    if(groupTotal.test(marker)){count('groupTotal');active=undefined;activePostingAccountId=undefined;continue;}
+    if(groupTotal.test(marker)){count('groupTotal');active=undefined;activePostingAccountId=undefined;if(/^G_\{\d+\}_T$/.test(marker))closedGroup=true;continue;}
     if(spacerMarker.test(marker)){count('controlSpacer');if(sourceColumns.some(c=>cellText(cellAt(row,c)).trim() || cellAt(row,c).formula || cellAt(row,c).error)){errors.push(issue('CCH_SPACER_DATA','A CCH spacer/control row contains unexpected account or balance data. Review the original report layout.',row));active=undefined;activePostingAccountId=undefined;}continue;}
-    if(/^NetIncomeLoss(?:_B)?$/.test(marker)){count('netIncomeControl');active=undefined;activePostingAccountId=undefined;continue;}
+    if(/^NetIncomeLoss(?:_B)?$/.test(marker)){count('netIncomeControl');active=undefined;activePostingAccountId=undefined;if(marker==='NetIncomeLoss_B')netIncomeSpacerRow=row.sourceRowNumber;else netIncomeTotalRow=closedGroup && netIncomeSpacerRow===row.sourceRowNumber-1?row.sourceRowNumber:undefined;continue;}
+    if(marker==='SumAccountGroups_B'){
+      count('finalControlSpacer');
+      if(active || !closedGroup || netIncomeTotalRow!==row.sourceRowNumber-1 || finalSpacerRow!==undefined)errors.push(issue('CCH_FINAL_CONTROL_SEQUENCE','The final CCH control spacer must immediately follow the closed group and Net Income/Loss controls, outside the account table.',row));
+      if(!validFinalControl(row,true))errors.push(issue('CCH_FINAL_CONTROL_DATA','The final CCH control spacer contains unexpected account or financial data.',row));
+      finalSpacerRow=row.sourceRowNumber;active=undefined;activePostingAccountId=undefined;continue;
+    }
+    if(marker==='SumAccountGroups'){
+      count('finalControlTotal');
+      if(finalSpacerRow!==row.sourceRowNumber-1 || netIncomeTotalRow!==row.sourceRowNumber-2)errors.push(issue('CCH_FINAL_CONTROL_SEQUENCE','The final CCH total must immediately follow its control spacer and the Net Income/Loss controls.',row));
+      if(!validFinalControl(row,false))errors.push(issue('CCH_FINAL_CONTROL_DATA','The final CCH total contains unexpected account information or a nonzero balance.',row));
+      finalTotalRow=row.sourceRowNumber;active=undefined;activePostingAccountId=undefined;continue;
+    }
     const journalEntry=journalEntryMarker.exec(marker);
     if(journalEntry && active?.id===journalEntry[1] && activePostingAccountId===journalEntry[2]){
       count('journalEntryControl');
@@ -109,6 +132,7 @@ export function parsePublishedCCH(workbook: ParserWorkbook, candidate?: Publishe
     }
     const account=accountMarker.exec(marker);
     if(account){
+      closedGroup=false;
       if(!active)errors.push(issue('CCH_ORPHAN_ACCOUNT','The CCH report contains a posting account before a valid leadcode/subgroup heading, or after its closing subtotal. Assign the account to a valid subgroup and export again.',row));
       if(row.sourceRowNumber<=headerRow.sourceRowNumber)errors.push(issue('CCH_ACCOUNT_BEFORE_HEADER','A posting account appears before the CCH balance headers. Export the complete original report.',row));
       projected.push({sourceRowNumber:row.sourceRowNumber,cells:[cellAt(row,accountCol),cellAt(row,descriptionCol),active?.code??{value:null},active?.description??{value:null},cellAt(row,unadjustedCol),cellAt(row,finalCol),cellAt(row,priorCol)]});
@@ -117,6 +141,7 @@ export function parsePublishedCCH(workbook: ParserWorkbook, candidate?: Publishe
     }
     errors.push(issue('CCH_UNKNOWN_ROW','An unrecognized row interrupts the CCH account table. Review the report layout or export a fresh original CCH Leadcode Trial Balance.',row));active=undefined;activePostingAccountId=undefined;count('review');
   }
+  if(finalSpacerRow!==undefined && finalTotalRow===undefined)errors.push(issue('CCH_FINAL_CONTROL_SEQUENCE','The final CCH control spacer has no immediately following SumAccountGroups total.',sheet.rows.find(row=>row.sourceRowNumber===finalSpacerRow)));
   for(const merge of sheet.mergedRanges??[]){
     const relevant=sheet.rows.some(row=>row.sourceRowNumber>=merge.startRow && row.sourceRowNumber<=merge.endRow && (accountMarker.test(cellText(cellAt(row,markerColumn))) || subgroupMarker.test(cellText(cellAt(row,markerColumn))) || header(row)>=0));
     if(relevant && [...sourceColumns,markerColumn].some(c=>c+1>=merge.startColumn && c+1<=merge.endColumn))errors.push(issue('CCH_MERGED_ACCOUNT_DATA','Merged account, subgroup or balance cells cannot establish reliable CCH account assignments. Export these fields in separate cells.'));
